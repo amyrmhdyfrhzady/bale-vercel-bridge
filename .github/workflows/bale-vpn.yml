@@ -53,13 +53,21 @@ jobs:
       - name: Create BaleVPN config
         shell: bash
         env:
-          BALE_ACCESS_TOKEN: ${{ secrets.BALE_ACCESS_TOKEN }}
+          RUNNER_TOKEN_SECRET: ${{ secrets.RUNNER_TOKEN_SECRET }}
         run: |
           set -e
           cd "$HOME/bale-vpn"
 
+          BALE_ACCESS_TOKEN="$(
+            curl -fsS \
+              --max-time 20 \
+              -H "Authorization: Bearer ${RUNNER_TOKEN_SECRET}" \
+              "https://balevpncontroller.agkirusu4su5s.workers.dev/runner/token" |
+              jq -er '.token'
+          )
+
           if [ -z "$BALE_ACCESS_TOKEN" ]; then
-            echo "ERROR: BALE_ACCESS_TOKEN is not configured."
+            echo "ERROR: Could not retrieve BALE_ACCESS_TOKEN from Controller."
             exit 1
           fi
 
