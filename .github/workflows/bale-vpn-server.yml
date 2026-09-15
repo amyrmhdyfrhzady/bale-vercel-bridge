@@ -70,7 +70,7 @@ jobs:
             "natMode": "userspace",
             "port": 3001,
             "socks5Port": 1080,
-            "admission": [34568984,1888899708],
+            "admission": ["34568984","1888899708"],
             "blacklist": [],
             "maxClients": 5
           }
