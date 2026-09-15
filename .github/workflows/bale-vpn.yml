@@ -44,7 +44,7 @@ jobs:
 
           curl -fL \
             "https://github.com/kookoo1sabzy/BaleVPN/releases/download/${VERSION}/bale-vpn-headless-linux-x86_64" \
-            -o bale-vpn-headless-linux-x86_64"
+            -o bale-vpn-headless-linux-x86_64
 
           chmod +x bale-vpn-headless-linux-x86_64
 
