@@ -1,0 +1,262 @@
+name: BaleVPN Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      controller_run_id:
+        description: "Controller run ID"
+        required: false
+        type: string
+      controller_callback_url:
+        description: "Controller callback URL"
+        required: false
+        type: string
+
+concurrency:
+  group: bale-vpn-server
+  cancel-in-progress: false
+
+jobs:
+  bale-vpn:
+    name: BaleVPN Server
+    runs-on: ubuntu-latest
+    timeout-minutes: 290
+
+    steps:
+      - name: Prepare
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl jq
+
+          mkdir -p "$HOME/bale-vpn"
+          cd "$HOME/bale-vpn"
+
+      - name: Download BaleVPN
+        shell: bash
+        run: |
+          set -e
+          cd "$HOME/bale-vpn"
+
+          VERSION="v2.1.2"
+
+          curl -fL \
+            "https://github.com/kookoo1sabzy/BaleVPN/releases/download/${VERSION}/bale-vpn-headless-linux-x86_64" \
+            -o bale-vpn-headless-linux-x86_64
+
+          chmod +x bale-vpn-headless-linux-x86_64
+
+          ./bale-vpn-headless-linux-x86_64 --help >/dev/null 2>&1 || true
+
+      - name: Create BaleVPN config
+        shell: bash
+        env:
+          BALE_ACCESS_TOKEN: ${{ secrets.BALE_ACCESS_TOKEN }}
+        run: |
+          set -e
+          cd "$HOME/bale-vpn"
+
+          if [ -z "$BALE_ACCESS_TOKEN" ]; then
+            echo "ERROR: BALE_ACCESS_TOKEN is not configured."
+            exit 1
+          fi
+
+          cat > .bale-vpn_config.json <<EOF
+          {
+            "token": "${BALE_ACCESS_TOKEN}",
+            "mode": "server",
+            "natMode": "userspace",
+            "port": 3001,
+            "socks5Port": 1080,
+            "admission": [],
+            "blacklist": [],
+            "maxClients": 5
+          }
+          EOF
+
+          chmod 600 .bale-vpn_config.json
+
+      - name: Get Runner IP
+        id: runner-ip
+        shell: bash
+        run: |
+          set -e
+
+          IP="$(curl -4 -fsS --max-time 15 https://api.ipify.org)"
+
+          if ! echo "$IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: Could not determine public IPv4."
+            exit 1
+          fi
+
+          echo "ip=$IP" >> "$GITHUB_OUTPUT"
+
+          echo "Runner IPv4: $IP"
+
+      - name: Notify Controller - Runner Ready
+        if: ${{ inputs.controller_callback_url != '' }}
+        shell: bash
+        env:
+          CALLBACK_URL: ${{ inputs.controller_callback_url }}
+          RUN_ID: ${{ inputs.controller_run_id }}
+          RUNNER_IP: ${{ steps.runner-ip.outputs.ip }}
+        run: |
+          set -e
+
+          curl -fsS \
+            --max-time 20 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "$CALLBACK_URL" \
+            -d "$(jq -n \
+              --arg event "runner_ready" \
+              --arg run_id "$RUN_ID" \
+              --arg ip "$RUNNER_IP" \
+              --arg github_run_id "${GITHUB_RUN_ID}" \
+              '{
+                event: $event,
+                controller_run_id: $run_id,
+                github_run_id: $github_run_id,
+                ip: $ip
+              }')" \
+            || echo "Controller callback failed."
+
+      - name: Start BaleVPN
+        id: balevpn
+        shell: bash
+        run: |
+          set -e
+          cd "$HOME/bale-vpn"
+
+          echo "Starting BaleVPN server..."
+
+          ./bale-vpn-headless-linux-x86_64 server \
+            --nat-mode userspace \
+            > bale-vpn.log 2>&1 &
+
+          PID=$!
+          echo "$PID" > bale-vpn.pid
+
+          sleep 8
+
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "BaleVPN failed to start."
+            echo "----- BaleVPN log -----"
+            cat bale-vpn.log || true
+            exit 1
+          fi
+
+          echo "BaleVPN started."
+          echo "PID: $PID"
+
+      - name: Notify Controller - VPN Started
+        if: ${{ inputs.controller_callback_url != '' }}
+        shell: bash
+        env:
+          CALLBACK_URL: ${{ inputs.controller_callback_url }}
+          RUN_ID: ${{ inputs.controller_run_id }}
+        run: |
+          set -e
+
+          curl -fsS \
+            --max-time 20 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "$CALLBACK_URL" \
+            -d "$(jq -n \
+              --arg event "vpn_started" \
+              --arg run_id "$RUN_ID" \
+              --arg github_run_id "${GITHUB_RUN_ID}" \
+              '{
+                event: $event,
+                controller_run_id: $run_id,
+                github_run_id: $github_run_id
+              }')" \
+            || echo "Controller callback failed."
+
+      - name: Keep BaleVPN alive
+        shell: bash
+        run: |
+          set -e
+          cd "$HOME/bale-vpn"
+
+          PID="$(cat bale-vpn.pid)"
+
+          # Approximately 4h40m.
+          END=$(( $(date +%s) + 16800 ))
+
+          while [ "$(date +%s)" -lt "$END" ]; do
+
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "BaleVPN process stopped unexpectedly."
+
+              echo "----- BaleVPN log -----"
+              tail -n 200 bale-vpn.log || true
+
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+          echo "Scheduled runtime finished."
+
+      - name: Stop BaleVPN
+        if: always()
+        shell: bash
+        run: |
+          cd "$HOME/bale-vpn" 2>/dev/null || exit 0
+
+          if [ -f bale-vpn.pid ]; then
+            PID="$(cat bale-vpn.pid)"
+
+            if kill -0 "$PID" 2>/dev/null; then
+              echo "Stopping BaleVPN..."
+
+              kill "$PID" || true
+
+              for i in {1..20}; do
+                if ! kill -0 "$PID" 2>/dev/null; then
+                  break
+                fi
+
+                sleep 1
+              done
+
+              kill -9 "$PID" 2>/dev/null || true
+            fi
+          fi
+
+      - name: Notify Controller - VPN Stopped
+        if: ${{ always() && inputs.controller_callback_url != '' }}
+        shell: bash
+        env:
+          CALLBACK_URL: ${{ inputs.controller_callback_url }}
+          RUN_ID: ${{ inputs.controller_run_id }}
+        run: |
+          curl -fsS \
+            --max-time 20 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "$CALLBACK_URL" \
+            -d "$(jq -n \
+              --arg event "vpn_stopped" \
+              --arg run_id "$RUN_ID" \
+              --arg github_run_id "${GITHUB_RUN_ID}" \
+              '{
+                event: $event,
+                controller_run_id: $run_id,
+                github_run_id: $github_run_id
+              }')" \
+            || echo "Controller callback failed."
+
+      - name: Show BaleVPN log
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$HOME/bale-vpn/bale-vpn.log" ]; then
+            echo "----- Last BaleVPN log lines -----"
+            tail -n 200 "$HOME/bale-vpn/bale-vpn.log"
+          fi
