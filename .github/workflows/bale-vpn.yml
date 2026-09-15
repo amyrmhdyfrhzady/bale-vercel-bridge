@@ -64,7 +64,7 @@ jobs:
               -H "Authorization: Bearer ${RUNNER_TOKEN_SECRET}" \
               "https://balevpncontroller.agkirusu4su5s.workers.dev/runner/token" |
               jq -er '.token'
-          )
+          )"
 
           if [ -z "$BALE_ACCESS_TOKEN" ]; then
             echo "ERROR: Could not retrieve BALE_ACCESS_TOKEN from Controller."
