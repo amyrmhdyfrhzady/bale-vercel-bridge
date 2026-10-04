@@ -31,74 +31,22 @@ jobs:
         shell: bash
         run: |
           set -e
+
           sudo apt-get update -qq
-          sudo apt-get install -y -qq curl jq unzip iproute2
+          sudo apt-get install -y -qq curl jq
+
           mkdir -p "$HOME/bale-vpn"
           cd "$HOME/bale-vpn"
-
-          printf '%s' '${{ inputs.controller_callback_url }}' > controller_callback_url
-          printf '%s' '${{ inputs.controller_run_id }}' > controller_run_id
-
-          chmod 600 controller_callback_url controller_run_id
-
-          cat > log.sh <<'LOG'
-          #!/usr/bin/env bash
-
-          set -u
-
-          LEVEL="${1:-INFO}"
-          shift || true
-
-          MESSAGE="$*"
-          TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-
-          echo "[${TS}] [${LEVEL}] ${MESSAGE}"
-
-          CALLBACK_URL="$(cat "$HOME/bale-vpn/controller_callback_url" 2>/dev/null || true)"
-          RUN_ID="$(cat "$HOME/bale-vpn/controller_run_id" 2>/dev/null || true)"
-
-          if [ -n "$CALLBACK_URL" ]; then
-            jq -n \
-              --arg event "runner_log" \
-              --arg level "$LEVEL" \
-              --arg message "${MESSAGE:0:3500}" \
-              --arg run_id "$RUN_ID" \
-              --arg github_run_id "${GITHUB_RUN_ID:-}" \
-              '{
-                event:$event,
-                level:$level,
-                message:$message,
-                controller_run_id:$run_id,
-                github_run_id:$github_run_id
-              }' |
-            curl -fsS \
-              --max-time 15 \
-              -X POST \
-              -H 'Content-Type: application/json' \
-              "$CALLBACK_URL" \
-              -d @- \
-              >/dev/null 2>&1 || true
-          fi
-          LOG
-
-          chmod 700 log.sh
-
-          ./log.sh INFO "Runner prepared. GitHub run ${GITHUB_RUN_ID}."
 
       - name: Download BaleVPN
         shell: bash
         run: |
           set -e
-
           cd "$HOME/bale-vpn"
 
           VERSION="v2.1.2"
 
-          ./log.sh INFO "Downloading BaleVPN ${VERSION}."
-
           curl -fL \
-            --retry 3 \
-            --retry-delay 2 \
             "https://github.com/kookoo1sabzy/BaleVPN/releases/download/${VERSION}/bale-vpn-headless-linux-x86_64" \
             -o bale-vpn-headless-linux-x86_64
 
@@ -106,51 +54,13 @@ jobs:
 
           ./bale-vpn-headless-linux-x86_64 --help >/dev/null 2>&1 || true
 
-          ./log.sh INFO "BaleVPN binary ready."
-
-      - name: Download Xray Client
-        shell: bash
-        run: |
-          set -u
-
-          cd "$HOME/bale-vpn"
-
-          XRAY_VERSION="v26.9.9"
-
-          ./log.sh INFO "Downloading Xray-core ${XRAY_VERSION}."
-
-          if curl -fL \
-            --retry 3 \
-            --retry-delay 2 \
-            "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip" \
-            -o xray.zip &&
-            unzip -o -q xray.zip xray; then
-
-            chmod +x xray
-
-            if ./xray version; then
-              printf '%s' "1" > xray-available
-              ./log.sh INFO "Xray binary ready."
-            else
-              printf '%s' "0" > xray-available
-              ./log.sh WARN "Xray binary failed version check. DIRECT mode will be used."
-            fi
-
-          else
-            printf '%s' "0" > xray-available
-            ./log.sh WARN "Xray download failed. DIRECT mode will be used and BaleVPN will continue."
-          fi
-
       - name: Create BaleVPN config
         shell: bash
         env:
           RUNNER_TOKEN_SECRET: ${{ secrets.RUNNER_TOKEN_SECRET }}
         run: |
           set -e
-
           cd "$HOME/bale-vpn"
-
-          ./log.sh INFO "Requesting BaleVPN access token from controller."
 
           BALE_ACCESS_TOKEN="$(
             curl -fsS \
@@ -161,7 +71,7 @@ jobs:
           )"
 
           if [ -z "$BALE_ACCESS_TOKEN" ]; then
-            ./log.sh ERROR "Could not retrieve BaleVPN access token."
+            echo "ERROR: Could not retrieve BALE_ACCESS_TOKEN from Controller."
             exit 1
           fi
 
@@ -180,49 +90,22 @@ jobs:
 
           chmod 600 .bale-vpn_config.json
 
-          ./log.sh INFO "BaleVPN configuration created."
-
       - name: Get Runner IP
         id: runner-ip
         shell: bash
         run: |
-          set -u
+          set -e
 
-          cd "$HOME/bale-vpn"
+          IP="$(curl -4 -fsS --max-time 15 https://api.ipify.org)"
 
-          IP=""
-
-          for URL in \
-            "https://api.ipify.org" \
-            "https://ifconfig.me/ip" \
-            "https://icanhazip.com"
-          do
-            ./log.sh INFO "Trying public IPv4 endpoint: ${URL}"
-
-            VALUE="$(
-              curl -4 -fsS \
-                --connect-timeout 5 \
-                --max-time 15 \
-                "$URL" 2>/dev/null |
-              tr -d '[:space:]' || true
-            )"
-
-            if echo "$VALUE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-              IP="$VALUE"
-              break
-            fi
-          done
-
-          if [ -z "$IP" ]; then
-            ./log.sh WARN "Could not determine Runner public IPv4. Continuing anyway."
-            IP="unknown"
+          if ! echo "$IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: Could not determine public IPv4."
+            exit 1
           fi
 
           echo "ip=$IP" >> "$GITHUB_OUTPUT"
 
           echo "Runner IPv4: $IP"
-
-          ./log.sh INFO "Runner public IPv4: ${IP}."
 
       - name: Notify Controller - Runner Ready
         if: ${{ inputs.controller_callback_url != '' }}
@@ -232,7 +115,7 @@ jobs:
           RUN_ID: ${{ inputs.controller_run_id }}
           RUNNER_IP: ${{ steps.runner-ip.outputs.ip }}
         run: |
-          set -u
+          set -e
 
           curl -fsS \
             --max-time 20 \
@@ -245,868 +128,10 @@ jobs:
               --arg ip "$RUNNER_IP" \
               --arg github_run_id "${GITHUB_RUN_ID}" \
               '{
-                event:$event,
-                controller_run_id:$run_id,
-                github_run_id:$github_run_id,
-                ip:$ip
-              }')" \
-            || echo "Controller callback failed."
-
-      - name: Create Xray primary config
-        shell: bash
-        run: |
-          set -e
-
-          cd "$HOME/bale-vpn"
-
-          cat > xray-primary.json <<'EOF'
-          {
-            "dns": {
-              "disableCache": false,
-              "disableFallback": false,
-              "disableFallbackIfMatch": false,
-              "hosts": {
-                "chat.openai.com": [
-                  "172.64.150.28",
-                  "104.18.37.228"
-                ],
-                "cloudflare-dns.com": [
-                  "104.16.248.249",
-                  "104.16.249.249",
-                  "2606:4700::6810:f8f9",
-                  "2606:4700::6810:f9f9"
-                ],
-                "common.dot.dns.yandex.net": [
-                  "77.88.8.8",
-                  "77.88.8.1",
-                  "2a02:6b8::feed:0ff",
-                  "2a02:6b8:0:1::feed:0ff"
-                ],
-                "dns.alidns.com": [
-                  "223.5.5.5",
-                  "223.6.6.6",
-                  "2400:3200::1",
-                  "2400:3200:baba::1"
-                ],
-                "dns.cloudflare.com": [
-                  "104.16.132.229",
-                  "104.16.133.229",
-                  "2606:4700::6810:84e5",
-                  "2606:4700::6810:85e5"
-                ],
-                "dns.google": [
-                  "8.8.8.8",
-                  "8.8.4.4",
-                  "2001:4860:4860::8888",
-                  "2001:4860:4860::8844"
-                ],
-                "dns.quad9.net": [
-                  "9.9.9.9",
-                  "149.112.112.112",
-                  "2620:fe::fe",
-                  "2620:fe::9"
-                ],
-                "domain:googleapis.cn": "googleapis.com",
-                "dot.pub": [
-                  "1.12.12.12",
-                  "120.53.53.53"
-                ],
-                "one.one.one.one": [
-                  "1.1.1.1",
-                  "1.0.0.1",
-                  "2606:4700:4700::1111",
-                  "2606:4700:4700::1001"
-                ]
-              },
-              "queryStrategy": "UseIPv4",
-              "servers": [
-                "1.1.1.1"
-              ]
-            },
-            "inbounds": [
-              {
-                "listen": "127.0.0.1",
-                "port": 58254,
-                "protocol": "socks",
-                "settings": {
-                  "auth": "noauth",
-                  "udp": true,
-                  "userLevel": 8
-                },
-                "sniffing": {
-                  "destOverride": [
-                    "tls",
-                    "http",
-                    "quic"
-                  ],
-                  "enabled": true,
-                  "metadataOnly": false,
-                  "routeOnly": false
-                },
-                "tag": "socks"
-              },
-              {
-                "protocol": "tun",
-                "settings": {
-                  "dns": [
-                    "1.1.1.1",
-                    "1.0.0.1"
-                  ],
-                  "gateway": [
-                    "198.18.0.1/30"
-                  ],
-                  "mtu": 1500,
-                  "name": "xray0",
-                  "userLevel": 8,
-                  "autoSystemRoutingTable": [
-                    "0.0.0.0/0"
-                  ],
-                  "autoOutboundsInterface": "auto"
-                },
-                "sniffing": {
-                  "destOverride": [
-                    "tls",
-                    "http",
-                    "quic"
-                  ],
-                  "enabled": true,
-                  "metadataOnly": false,
-                  "routeOnly": false
-                },
-                "tag": "tun"
-              }
-            ],
-            "log": {
-              "access": "xray-access.log",
-              "dnsLog": true,
-              "error": "xray-error.log",
-              "loglevel": "warning"
-            },
-            "outbounds": [
-              {
-                "mux": {
-                  "concurrency": 1,
-                  "enabled": true,
-                  "xudpConcurrency": 1,
-                  "xudpProxyUDP443": "allow"
-                },
-                "protocol": "VLESS",
-                "settings": {
-                  "vnext": [
-                    {
-                      "address": "chat.openai.com",
-                      "port": 443,
-                      "users": [
-                        {
-                          "encryption": "none",
-                          "id": "d18940b5-465a-62eb-d04e-455d00000000",
-                          "level": 8
-                        }
-                      ]
-                    }
-                  ]
-                },
-                "streamSettings": {
-                  "finalmask": {
-                    "tcp": [
-                      {
-                        "settings": {
-                          "delay": "1-1",
-                          "length": "1-7",
-                          "packets": "tlshello"
-                        },
-                        "type": "fragment"
-                      }
-                    ],
-                    "udp": [
-                      {
-                        "settings": {
-                          "noise": [
-                            {
-                              "delay": "10-16",
-                              "rand": "10-20"
-                            }
-                          ]
-                        },
-                        "type": "noise"
-                      }
-                    ]
-                  },
-                  "network": "ws",
-                  "security": "tls",
-                  "sockopt": {
-                    "domainStrategy": "UseIP"
-                  },
-                  "tlsSettings": {
-                    "allowInsecure": false,
-                    "fingerprint": "firefox",
-                    "publicKey": "enabled",
-                    "serverName": "amirmahdi.amyrmhdyfrhzady.workers.dev",
-                    "show": false
-                  },
-                  "wsSettings": {
-                    "host": "amirmahdi.amyrmhdyfrhzady.workers.dev",
-                    "path": "/sync"
-                  }
-                },
-                "tag": "proxy"
-              },
-              {
-                "protocol": "freedom",
-                "streamSettings": {
-                  "network": "tcp",
-                  "sockopt": {
-                    "domainStrategy": "UseIP"
-                  }
-                },
-                "tag": "direct"
-              },
-              {
-                "protocol": "blackhole",
-                "settings": {
-                  "response": {
-                    "type": "none"
-                  }
-                },
-                "tag": "block"
-              }
-            ],
-            "policy": {
-              "levels": {
-                "8": {
-                  "bufferSize": 0,
-                  "connIdle": 30,
-                  "downlinkOnly": 1,
-                  "handshake": 4,
-                  "statsUserDownlink": false,
-                  "statsUserUplink": false,
-                  "uplinkOnly": 1
-                }
-              },
-              "system": {
-                "statsOutboundDownlink": true,
-                "statsOutboundUplink": true
-              }
-            },
-            "routing": {
-              "balancers": [],
-              "domainStrategy": "AsIs",
-              "rules": [
-                {
-                  "ip": "8.8.8.8",
-                  "outboundTag": "direct",
-                  "port": "53",
-                  "ruleTag": "rule-0",
-                  "type": "field"
-                },
-                {
-                  "ip": "1.1.1.1",
-                  "outboundTag": "proxy",
-                  "port": "53",
-                  "ruleTag": "rule-1",
-                  "type": "field"
-                }
-              ]
-            },
-            "stats": {}
-          }
-          EOF
-
-          if [ "$(cat xray-available 2>/dev/null || echo 0)" = "1" ]; then
-            if ./xray run -test -c xray-primary.json; then
-              ./log.sh INFO "Primary Xray configuration syntax check passed."
-            else
-              touch primary-config-invalid
-              ./log.sh WARN "Primary Xray configuration test failed. It will be skipped and fallback will be tried."
-            fi
-          else
-            ./log.sh WARN "Skipping primary Xray config test because Xray binary is unavailable."
-          fi
-
-      - name: Create Xray fallback config
-        shell: bash
-        run: |
-          set -e
-
-          cd "$HOME/bale-vpn"
-
-          cat > xray-fallback.json <<'EOF'
-          {
-            "dns": {
-              "disableCache": false,
-              "disableFallback": false,
-              "disableFallbackIfMatch": false,
-              "hosts": {
-                "cloudflare-dns.com": [
-                  "104.16.248.249",
-                  "104.16.249.249",
-                  "2606:4700::6810:f8f9",
-                  "2606:4700::6810:f9f9"
-                ],
-                "common.dot.dns.yandex.net": [
-                  "77.88.8.8",
-                  "77.88.8.1",
-                  "2a02:6b8::feed:0ff",
-                  "2a02:6b8:0:1::feed:0ff"
-                ],
-                "dns.alidns.com": [
-                  "223.5.5.5",
-                  "223.6.6.6",
-                  "2400:3200::1",
-                  "2400:3200:baba::1"
-                ],
-                "dns.cloudflare.com": [
-                  "104.16.132.229",
-                  "104.16.133.229",
-                  "2606:4700::6810:84e5",
-                  "2606:4700::6810:85e5"
-                ],
-                "dns.google": [
-                  "8.8.8.8",
-                  "8.8.4.4",
-                  "2001:4860:4860::8888",
-                  "2001:4860:4860::8844"
-                ],
-                "dns.quad9.net": [
-                  "9.9.9.9",
-                  "149.112.112.112",
-                  "2620:fe::fe",
-                  "2620:fe::9"
-                ],
-                "domain:googleapis.cn": "googleapis.com",
-                "dot.pub": [
-                  "1.12.12.12",
-                  "120.53.53.53"
-                ],
-                "one.one.one.one": [
-                  "1.1.1.1",
-                  "1.0.0.1",
-                  "2606:4700:4700::1111",
-                  "2606:4700:4700::1001"
-                ],
-                "www.wto.org": [
-                  "172.64.146.66",
-                  "104.18.41.190"
-                ]
-              },
-              "queryStrategy": "UseIPv4",
-              "servers": [
-                "1.1.1.1"
-              ]
-            },
-            "inbounds": [
-              {
-                "listen": "127.0.0.1",
-                "port": 58256,
-                "protocol": "socks",
-                "settings": {
-                  "auth": "noauth",
-                  "udp": true,
-                  "userLevel": 8
-                },
-                "sniffing": {
-                  "destOverride": [
-                    "tls",
-                    "http",
-                    "quic"
-                  ],
-                  "enabled": true,
-                  "metadataOnly": false,
-                  "routeOnly": false
-                },
-                "tag": "socks"
-              },
-              {
-                "protocol": "tun",
-                "settings": {
-                  "dns": [
-                    "1.1.1.1",
-                    "1.0.0.1"
-                  ],
-                  "gateway": [
-                    "198.18.0.1/30"
-                  ],
-                  "mtu": 1500,
-                  "name": "xray0",
-                  "userLevel": 8,
-                  "autoSystemRoutingTable": [
-                    "0.0.0.0/0"
-                  ],
-                  "autoOutboundsInterface": "auto"
-                },
-                "sniffing": {
-                  "destOverride": [
-                    "tls",
-                    "http",
-                    "quic"
-                  ],
-                  "enabled": true,
-                  "metadataOnly": false,
-                  "routeOnly": false
-                },
-                "tag": "tun"
-              }
-            ],
-            "log": {
-              "access": "xray-access.log",
-              "dnsLog": true,
-              "error": "xray-error.log",
-              "loglevel": "warning"
-            },
-            "outbounds": [
-              {
-                "mux": {
-                  "concurrency": 1,
-                  "enabled": true,
-                  "xudpConcurrency": 1,
-                  "xudpProxyUDP443": "allow"
-                },
-                "protocol": "VLESS",
-                "settings": {
-                  "vnext": [
-                    {
-                      "address": "www.wto.org",
-                      "port": 443,
-                      "users": [
-                        {
-                          "encryption": "none",
-                          "id": "d18940b5-465a-62eb-d04e-455d00000004",
-                          "level": 8
-                        }
-                      ]
-                    }
-                  ]
-                },
-                "streamSettings": {
-                  "finalmask": {
-                    "tcp": [
-                      {
-                        "settings": {
-                          "delay": "1-1",
-                          "length": "1-7",
-                          "packets": "tlshello"
-                        },
-                        "type": "fragment"
-                      }
-                    ],
-                    "udp": [
-                      {
-                        "settings": {
-                          "noise": [
-                            {
-                              "delay": "10-16",
-                              "rand": "10-20"
-                            }
-                          ]
-                        },
-                        "type": "noise"
-                      }
-                    ]
-                  },
-                  "network": "ws",
-                  "security": "tls",
-                  "sockopt": {
-                    "domainStrategy": "UseIP"
-                  },
-                  "tlsSettings": {
-                    "allowInsecure": false,
-                    "fingerprint": "firefox",
-                    "publicKey": "enabled",
-                    "serverName": "amirmahdi.amyrmhdyfrhzady.workers.dev",
-                    "show": false
-                  },
-                  "wsSettings": {
-                    "host": "amirmahdi.amyrmhdyfrhzady.workers.dev",
-                    "path": "/sync"
-                  }
-                },
-                "tag": "proxy"
-              },
-              {
-                "protocol": "freedom",
-                "streamSettings": {
-                  "network": "tcp",
-                  "sockopt": {
-                    "domainStrategy": "UseIP"
-                  }
-                },
-                "tag": "direct"
-              },
-              {
-                "protocol": "blackhole",
-                "settings": {
-                  "response": {
-                    "type": "none"
-                  }
-                },
-                "tag": "block"
-              }
-            ],
-            "policy": {
-              "levels": {
-                "8": {
-                  "bufferSize": 0,
-                  "connIdle": 30,
-                  "downlinkOnly": 1,
-                  "handshake": 4,
-                  "statsUserDownlink": false,
-                  "statsUserUplink": false,
-                  "uplinkOnly": 1
-                }
-              },
-              "system": {
-                "statsOutboundDownlink": true,
-                "statsOutboundUplink": true
-              }
-            },
-            "routing": {
-              "balancers": [],
-              "domainStrategy": "AsIs",
-              "rules": [
-                {
-                  "ip": "8.8.8.8",
-                  "outboundTag": "direct",
-                  "port": "53",
-                  "ruleTag": "rule-0",
-                  "type": "field"
-                },
-                {
-                  "ip": "1.1.1.1",
-                  "outboundTag": "proxy",
-                  "port": "53",
-                  "ruleTag": "rule-1",
-                  "type": "field"
-                }
-              ]
-            },
-            "stats": {}
-          }
-          EOF
-
-          if [ "$(cat xray-available 2>/dev/null || echo 0)" = "1" ]; then
-            if ./xray run -test -c xray-fallback.json; then
-              ./log.sh INFO "Fallback Xray configuration syntax check passed."
-            else
-              touch fallback-config-invalid
-              ./log.sh WARN "Fallback Xray configuration test failed. DIRECT mode will be used."
-            fi
-          else
-            ./log.sh WARN "Skipping fallback Xray config test because Xray binary is unavailable."
-          fi
-
-      - name: Start Xray with fallback
-        id: xray
-        shell: bash
-        run: |
-          set -u
-
-          cd "$HOME/bale-vpn"
-
-          DEFAULT_ROUTE="$(ip -4 route show default | head -n 1 || true)"
-          printf '%s' "$DEFAULT_ROUTE" > default-route.txt
-
-          cleanup_xray() {
-            if [ -f xray.pid ]; then
-              PID="$(cat xray.pid 2>/dev/null || true)"
-
-              if [ -n "$PID" ]; then
-                kill "$PID" 2>/dev/null || true
-                sleep 2
-                kill -9 "$PID" 2>/dev/null || true
-              fi
-            fi
-
-            rm -f xray.pid
-
-            ip link delete xray0 2>/dev/null || true
-
-            if [ -n "$DEFAULT_ROUTE" ]; then
-              ip route replace $DEFAULT_ROUTE 2>/dev/null || true
-            fi
-          }
-
-          start_and_test() {
-            CONFIG="$1"
-            SOCKS_PORT="$2"
-            LABEL="$3"
-
-            rm -f xray.pid
-            rm -f xray-access.log
-            rm -f xray-error.log
-            rm -f xray-runtime.log
-
-            ./log.sh INFO "Starting ${LABEL} Xray client."
-
-            ./xray run \
-              -c "$CONFIG" \
-              > xray-runtime.log 2>&1 &
-
-            PID=$!
-
-            echo "$PID" > xray.pid
-
-            sleep 5
-
-            if ! kill -0 "$PID" 2>/dev/null; then
-              ./log.sh ERROR "${LABEL} Xray process exited during startup."
-
-              echo "----- ${LABEL} Xray runtime log -----"
-              tail -n 150 xray-runtime.log 2>/dev/null || true
-
-              return 1
-            fi
-
-            for attempt in 1 2 3 4 5; do
-              echo "Xray connectivity test ${LABEL}, attempt ${attempt}/5..."
-
-              TEST_IP=""
-
-              for URL in \
-                "https://api.ipify.org" \
-                "https://ifconfig.me/ip" \
-                "https://icanhazip.com"
-              do
-                VALUE="$(
-                  curl -4 \
-                    -fsS \
-                    --connect-timeout 5 \
-                    --max-time 15 \
-                    --socks5-hostname "127.0.0.1:${SOCKS_PORT}" \
-                    "$URL" 2>/tmp/xray-curl.err |
-                  tr -d '[:space:]' || true
-                )"
-
-                if echo "$VALUE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-                  TEST_IP="$VALUE"
-                  break
-                fi
-              done
-
-              if [ -n "$TEST_IP" ]; then
-                echo "Xray ${LABEL} exit IP: ${TEST_IP}"
-
-                ./log.sh INFO \
-                  "${LABEL} Xray connectivity verified. Exit IP: ${TEST_IP}."
-
-                printf '%s' "${LABEL}" > xray-mode.txt
-                printf '%s' "${TEST_IP}" > xray-egress-ip.txt
-
-                return 0
-              fi
-
-              if ! kill -0 "$PID" 2>/dev/null; then
-                ./log.sh ERROR "${LABEL} Xray process stopped during connectivity testing."
-                break
-              fi
-
-              sleep 3
-            done
-
-            ./log.sh ERROR "${LABEL} Xray connectivity test failed."
-
-            echo "----- ${LABEL} Xray runtime log -----"
-            tail -n 150 xray-runtime.log 2>/dev/null || true
-
-            echo "----- ${LABEL} Xray error log -----"
-            tail -n 150 xray-error.log 2>/dev/null || true
-
-            cleanup_xray
-
-            return 1
-          }
-
-          PROXY_SELECTED=0
-
-          if [ "$(cat xray-available 2>/dev/null || echo 0)" = "1" ] &&
-             [ ! -f primary-config-invalid ]; then
-
-            if start_and_test \
-              xray-primary.json \
-              58254 \
-              "PRIMARY"; then
-
-              PROXY_SELECTED=1
-
-              echo "Primary Xray selected."
-
-            else
-              ./log.sh WARN \
-                "Primary Xray unavailable. Switching to fallback configuration."
-            fi
-
-          else
-            ./log.sh WARN \
-              "Primary Xray is unavailable or invalid. Switching to fallback configuration."
-          fi
-
-          if [ "$PROXY_SELECTED" -eq 0 ]; then
-
-            if [ "$(cat xray-available 2>/dev/null || echo 0)" = "1" ] &&
-               [ ! -f fallback-config-invalid ]; then
-
-              if start_and_test \
-                xray-fallback.json \
-                58256 \
-                "FALLBACK"; then
-
-                PROXY_SELECTED=1
-
-                echo "Fallback Xray selected."
-
-              else
-                ./log.sh WARN \
-                  "Fallback Xray unavailable. Switching to DIRECT internet mode."
-              fi
-
-            else
-              ./log.sh WARN \
-                "Fallback Xray is unavailable or invalid. Switching to DIRECT internet mode."
-            fi
-          fi
-
-          if [ "$PROXY_SELECTED" -eq 0 ]; then
-            cleanup_xray
-
-            printf '%s' "DIRECT" > xray-mode.txt
-            printf '%s' "" > xray-egress-ip.txt
-
-            ./log.sh WARN \
-              "Both Xray configurations are unavailable. DIRECT internet mode is active."
-          fi
-
-          MODE="$(cat xray-mode.txt)"
-
-          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
-
-          echo "Xray mode: ${MODE}"
-
-          ip -4 route get 1.1.1.1 || true
-
-          ./log.sh INFO \
-            "Network mode selected: ${MODE}."
-
-      - name: Get Active Egress IP
-        id: egress-ip
-        shell: bash
-        run: |
-          set -u
-
-          cd "$HOME/bale-vpn"
-
-          MODE="$(cat xray-mode.txt 2>/dev/null || echo DIRECT)"
-
-          case "$MODE" in
-            PRIMARY)
-              SOCKS_PORT="58254"
-              ;;
-            FALLBACK)
-              SOCKS_PORT="58256"
-              ;;
-            *)
-              SOCKS_PORT=""
-              ;;
-          esac
-
-          EGRESS_IP=""
-
-          if [ -n "$SOCKS_PORT" ]; then
-            ./log.sh INFO \
-              "Checking active Xray egress IP through SOCKS ${SOCKS_PORT}."
-
-            for URL in \
-              "https://api.ipify.org" \
-              "https://ifconfig.me/ip" \
-              "https://icanhazip.com"
-            do
-              VALUE="$(
-                curl -4 \
-                  -fsS \
-                  --connect-timeout 5 \
-                  --max-time 15 \
-                  --socks5-hostname "127.0.0.1:${SOCKS_PORT}" \
-                  "$URL" 2>/dev/null |
-                tr -d '[:space:]' || true
-              )"
-
-              if echo "$VALUE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-                EGRESS_IP="$VALUE"
-                break
-              fi
-            done
-          else
-            ./log.sh INFO "Checking DIRECT internet egress IP."
-
-            for URL in \
-              "https://api.ipify.org" \
-              "https://ifconfig.me/ip" \
-              "https://icanhazip.com"
-            do
-              VALUE="$(
-                curl -4 \
-                  -fsS \
-                  --connect-timeout 5 \
-                  --max-time 15 \
-                  "$URL" 2>/dev/null |
-                tr -d '[:space:]' || true
-              )"
-
-              if echo "$VALUE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-                EGRESS_IP="$VALUE"
-                break
-              fi
-            done
-          fi
-
-          if [ -z "$EGRESS_IP" ]; then
-            EGRESS_IP="unknown"
-            ./log.sh WARN \
-              "Active egress IP could not be determined."
-          else
-            ./log.sh INFO \
-              "Active network egress IPv4: ${EGRESS_IP}."
-          fi
-
-          printf '%s' "$EGRESS_IP" > active-egress-ip.txt
-
-          echo "ip=${EGRESS_IP}" >> "$GITHUB_OUTPUT"
-
-      - name: Notify Controller - Network Ready
-        if: ${{ inputs.controller_callback_url != '' }}
-        shell: bash
-        env:
-          CALLBACK_URL: ${{ inputs.controller_callback_url }}
-          RUN_ID: ${{ inputs.controller_run_id }}
-        run: |
-          set -u
-
-          cd "$HOME/bale-vpn"
-
-          MODE="$(cat xray-mode.txt 2>/dev/null || echo DIRECT)"
-          EGRESS_IP="$(cat active-egress-ip.txt 2>/dev/null || echo unknown)"
-          RUNNER_IP="${{ steps.runner-ip.outputs.ip }}"
-
-          ./log.sh INFO \
-            "Network ready. Mode=${MODE}, RunnerIP=${RUNNER_IP}, EgressIP=${EGRESS_IP}."
-
-          curl -fsS \
-            --max-time 20 \
-            -X POST \
-            -H "Content-Type: application/json" \
-            "$CALLBACK_URL" \
-            -d "$(jq -n \
-              --arg event "network_ready" \
-              --arg run_id "$RUN_ID" \
-              --arg github_run_id "${GITHUB_RUN_ID}" \
-              --arg runner_ip "$RUNNER_IP" \
-              --arg egress_ip "$EGRESS_IP" \
-              --arg mode "$MODE" \
-              '{
-                event:$event,
-                controller_run_id:$run_id,
-                github_run_id:$github_run_id,
-                runner_ip:$runner_ip,
-                egress_ip:$egress_ip,
-                mode:$mode
+                event: $event,
+                controller_run_id: $run_id,
+                github_run_id: $github_run_id,
+                ip: $ip
               }')" \
             || echo "Controller callback failed."
 
@@ -1115,33 +140,28 @@ jobs:
         shell: bash
         run: |
           set -e
-
           cd "$HOME/bale-vpn"
 
-          ./log.sh INFO "Starting BaleVPN server."
+          echo "Starting BaleVPN server..."
 
           ./bale-vpn-headless-linux-x86_64 server \
             --nat-mode userspace \
             > bale-vpn.log 2>&1 &
 
           PID=$!
-
           echo "$PID" > bale-vpn.pid
 
           sleep 8
 
           if ! kill -0 "$PID" 2>/dev/null; then
-            ./log.sh ERROR "BaleVPN failed to start."
-
-            echo "----- BaleVPN startup log -----"
+            echo "BaleVPN failed to start."
+            echo "----- BaleVPN log -----"
             cat bale-vpn.log || true
-
             exit 1
           fi
 
+          echo "BaleVPN started."
           echo "PID: $PID"
-
-          ./log.sh INFO "BaleVPN started successfully."
 
       - name: Notify Controller - VPN Started
         if: ${{ inputs.controller_callback_url != '' }}
@@ -1150,7 +170,7 @@ jobs:
           CALLBACK_URL: ${{ inputs.controller_callback_url }}
           RUN_ID: ${{ inputs.controller_run_id }}
         run: |
-          set -u
+          set -e
 
           curl -fsS \
             --max-time 20 \
@@ -1161,248 +181,56 @@ jobs:
               --arg event "vpn_started" \
               --arg run_id "$RUN_ID" \
               --arg github_run_id "${GITHUB_RUN_ID}" \
-              --arg mode "$(cat "$HOME/bale-vpn/xray-mode.txt" 2>/dev/null || echo DIRECT)" \
-              --arg egress_ip "$(cat "$HOME/bale-vpn/active-egress-ip.txt" 2>/dev/null || echo unknown)" \
               '{
-                event:$event,
-                controller_run_id:$run_id,
-                github_run_id:$github_run_id,
-                mode:$mode,
-                egress_ip:$egress_ip
+                event: $event,
+                controller_run_id: $run_id,
+                github_run_id: $github_run_id
               }')" \
             || echo "Controller callback failed."
 
-      - name: Keep BaleVPN alive and self-renew
+      - name: Keep BaleVPN alive
         shell: bash
         run: |
-          set -u
-
+          set -e
           cd "$HOME/bale-vpn"
 
           PID="$(cat bale-vpn.pid)"
 
-          START="$(date +%s)"
+          # Approximately 4h30m.
+          END=$(( $(date +%s) + 16200 ))
 
-          RENEW_AFTER=15000
-          END_AFTER=16200
-
-          NEXT_SCHEDULED=0
-
-          dispatch_next() {
-            REPO="${GITHUB_REPOSITORY}"
-            REF="${GITHUB_REF_NAME}"
-            GH_TOKEN="${GITHUB_TOKEN:-${{ github.token }}}"
-
-            ./log.sh INFO \
-              "Preparing self-renewal dispatch."
-
-            WORKFLOW_ID="$(
-              curl -fsS \
-                --max-time 20 \
-                -H "Authorization: Bearer ${GH_TOKEN}" \
-                -H "Accept: application/vnd.github+json" \
-                -H "X-GitHub-Api-Version: 2026-03-10" \
-                "https://api.github.com/repos/${REPO}/actions/workflows" |
-              jq -er '
-                .workflows[]
-                | select(.name == "BaleVPN Server")
-                | .id
-              ' |
-              head -n 1
-            )" || {
-              ./log.sh ERROR \
-                "Could not find BaleVPN Server workflow."
-              return 1
-            }
-
-            jq -n \
-              --arg ref "$REF" \
-              --arg controller_run_id "${{ inputs.controller_run_id }}" \
-              --arg controller_callback_url "${{ inputs.controller_callback_url }}" \
-              '{
-                ref:$ref,
-                inputs:{
-                  controller_run_id:$controller_run_id,
-                  controller_callback_url:$controller_callback_url
-                }
-              }' \
-              > /tmp/next-run.json
-
-            HTTP_CODE="$(
-              curl -sS \
-                --output /tmp/dispatch-response.json \
-                --write-out '%{http_code}' \
-                --max-time 30 \
-                -X POST \
-                -H "Authorization: Bearer ${GH_TOKEN}" \
-                -H "Accept: application/vnd.github+json" \
-                -H "X-GitHub-Api-Version: 2026-03-10" \
-                -H "Content-Type: application/json" \
-                "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_ID}/dispatches" \
-                --data @/tmp/next-run.json
-            )"
-
-            if [ "$HTTP_CODE" != "204" ] &&
-               [ "$HTTP_CODE" != "200" ]; then
-
-              ./log.sh ERROR \
-                "Self-renewal dispatch failed. HTTP ${HTTP_CODE}."
-
-              cat /tmp/dispatch-response.json || true
-
-              return 1
-            fi
-
-            ./log.sh INFO \
-              "Next BaleVPN Runner successfully dispatched."
-
-            return 0
-          }
-
-          while true; do
-            NOW="$(date +%s)"
-            ELAPSED=$((NOW - START))
+          while [ "$(date +%s)" -lt "$END" ]; do
 
             if ! kill -0 "$PID" 2>/dev/null; then
-              ./log.sh ERROR \
-                "BaleVPN process stopped unexpectedly."
-
-              if [ "$NEXT_SCHEDULED" -eq 0 ]; then
-                ./log.sh INFO \
-                  "Scheduling next Runner before exiting."
-
-                if dispatch_next; then
-                  NEXT_SCHEDULED=1
-                fi
-              fi
+              echo "BaleVPN process stopped unexpectedly."
 
               echo "----- BaleVPN log -----"
-              tail -n 200 bale-vpn.log 2>/dev/null || true
+              tail -n 200 bale-vpn.log || true
 
               exit 1
-            fi
-
-            MODE="$(cat xray-mode.txt 2>/dev/null || echo DIRECT)"
-
-            if [ "$MODE" != "DIRECT" ] &&
-               [ -f xray.pid ]; then
-
-              XPID="$(cat xray.pid 2>/dev/null || true)"
-
-              if [ -n "$XPID" ] &&
-                 ! kill -0 "$XPID" 2>/dev/null; then
-
-                ./log.sh WARN \
-                  "Xray ${MODE} process stopped."
-
-                ./log.sh INFO \
-                  "Disabling Xray and falling back to DIRECT mode."
-
-                ip link delete xray0 2>/dev/null || true
-
-                DEFAULT_ROUTE="$(cat default-route.txt 2>/dev/null || true)"
-
-                if [ -n "$DEFAULT_ROUTE" ]; then
-                  ip route replace $DEFAULT_ROUTE 2>/dev/null || true
-                fi
-
-                rm -f xray.pid
-
-                printf '%s' "DIRECT" > xray-mode.txt
-
-                ./log.sh INFO \
-                  "DIRECT fallback is now active; BaleVPN remains running."
-
-                DIRECT_IP=""
-
-                for URL in \
-                  "https://api.ipify.org" \
-                  "https://ifconfig.me/ip" \
-                  "https://icanhazip.com"
-                do
-                  VALUE="$(
-                    curl -4 \
-                      -fsS \
-                      --connect-timeout 5 \
-                      --max-time 15 \
-                      "$URL" 2>/dev/null |
-                    tr -d '[:space:]' || true
-                  )"
-
-                  if echo "$VALUE" |
-                     grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-                    DIRECT_IP="$VALUE"
-                    break
-                  fi
-                done
-
-                if [ -z "$DIRECT_IP" ]; then
-                  DIRECT_IP="unknown"
-                fi
-
-                printf '%s' "$DIRECT_IP" > active-egress-ip.txt
-
-                ./log.sh INFO \
-                  "DIRECT fallback egress IP: ${DIRECT_IP}."
-              fi
-            fi
-
-            if [ "$NEXT_SCHEDULED" -eq 0 ] &&
-               [ "$ELAPSED" -ge "$RENEW_AFTER" ]; then
-
-              if dispatch_next; then
-                NEXT_SCHEDULED=1
-              else
-                ./log.sh WARN \
-                  "Self-renewal failed; retrying in 30 seconds."
-              fi
-            fi
-
-            if [ "$ELAPSED" -ge "$END_AFTER" ]; then
-
-              if [ "$NEXT_SCHEDULED" -eq 0 ]; then
-                ./log.sh INFO \
-                  "Runtime limit reached. Dispatching next Runner."
-
-                if dispatch_next; then
-                  NEXT_SCHEDULED=1
-                fi
-              fi
-
-              ./log.sh INFO \
-                "Scheduled runtime finished."
-
-              break
             fi
 
             sleep 30
           done
 
-      - name: Ensure Next BaleVPN Runner
-        if: always()
+          echo "Scheduled runtime finished."
+
+      - name: Start Next BaleVPN Runner
+        if: ${{ success() }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROLLER_RUN_ID: ${{ inputs.controller_run_id }}
+          CONTROLLER_CALLBACK_URL: ${{ inputs.controller_callback_url }}
         run: |
-          set -u
-
-          cd "$HOME/bale-vpn" 2>/dev/null || exit 0
-
-          if [ -f next-run-dispatched ]; then
-            ./log.sh INFO \
-              "Next Runner was already dispatched."
-            exit 0
-          fi
-
-          if [ -f next-run-failed ]; then
-            ./log.sh WARN \
-              "Previous self-renewal attempt failed. Performing final dispatch attempt."
-          else
-            ./log.sh INFO \
-              "Performing final next-Runner safety dispatch."
-          fi
+          set -e
 
           REPO="${GITHUB_REPOSITORY}"
           REF="${GITHUB_REF_NAME}"
-          GH_TOKEN="${GITHUB_TOKEN:-${{ github.token }}}"
+
+          echo "Preparing next BaleVPN Runner..."
+          echo "Repository: ${REPO}"
+          echo "Ref: ${REF}"
 
           WORKFLOW_ID="$(
             curl -fsS \
@@ -1417,29 +245,33 @@ jobs:
               | .id
             ' |
             head -n 1
-          )" || {
-            ./log.sh ERROR \
-              "Final safety dispatch could not find workflow."
-            exit 0
-          }
+          )"
+
+          if [ -z "$WORKFLOW_ID" ]; then
+            echo "ERROR: BaleVPN Server workflow was not found."
+            exit 1
+          fi
+
+          echo "Workflow ID: ${WORKFLOW_ID}"
 
           jq -n \
             --arg ref "$REF" \
-            --arg controller_run_id "${{ inputs.controller_run_id }}" \
-            --arg controller_callback_url "${{ inputs.controller_callback_url }}" \
+            --arg controller_run_id "$CONTROLLER_RUN_ID" \
+            --arg controller_callback_url "$CONTROLLER_CALLBACK_URL" \
             '{
-              ref:$ref,
-              inputs:{
-                controller_run_id:$controller_run_id,
-                controller_callback_url:$controller_callback_url
+              ref: $ref,
+              inputs: {
+                controller_run_id: $controller_run_id,
+                controller_callback_url: $controller_callback_url
               }
-            }' \
-            > /tmp/final-next-run.json
+            }' > /tmp/next-run.json
+
+          echo "Dispatching next BaleVPN Runner..."
 
           HTTP_CODE="$(
             curl -sS \
-              --output /tmp/final-dispatch-response.json \
-              --write-out '%{http_code}' \
+              --output /tmp/dispatch-response.json \
+              --write-out "%{http_code}" \
               --max-time 30 \
               -X POST \
               -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -1447,68 +279,43 @@ jobs:
               -H "X-GitHub-Api-Version: 2026-03-10" \
               -H "Content-Type: application/json" \
               "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_ID}/dispatches" \
-              --data @/tmp/final-next-run.json
+              --data @/tmp/next-run.json
           )"
 
-          if [ "$HTTP_CODE" = "204" ] ||
-             [ "$HTTP_CODE" = "200" ]; then
-
-            touch next-run-dispatched
-
-            ./log.sh INFO \
-              "Final safety dispatch succeeded."
-
-          else
-            touch next-run-failed
-
-            ./log.sh ERROR \
-              "Final safety dispatch failed. HTTP ${HTTP_CODE}."
-
-            cat /tmp/final-dispatch-response.json || true
+          if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Failed to dispatch next Runner."
+            echo "HTTP status: $HTTP_CODE"
+            echo "Response:"
+            cat /tmp/dispatch-response.json || true
+            exit 1
           fi
 
-      - name: Stop BaleVPN and Xray
+          echo "Next BaleVPN Runner successfully dispatched."
+
+      - name: Stop BaleVPN
         if: always()
         shell: bash
         run: |
           cd "$HOME/bale-vpn" 2>/dev/null || exit 0
 
-          ./log.sh INFO \
-            "Stopping BaleVPN/Xray processes."
-
           if [ -f bale-vpn.pid ]; then
-            PID="$(cat bale-vpn.pid 2>/dev/null || true)"
+            PID="$(cat bale-vpn.pid)"
 
-            if [ -n "$PID" ] &&
-               kill -0 "$PID" 2>/dev/null; then
+            if kill -0 "$PID" 2>/dev/null; then
+              echo "Stopping BaleVPN..."
 
-              kill "$PID" 2>/dev/null || true
+              kill "$PID" || true
 
               for i in {1..20}; do
-                kill -0 "$PID" 2>/dev/null || break
+                if ! kill -0 "$PID" 2>/dev/null; then
+                  break
+                fi
+
                 sleep 1
               done
 
               kill -9 "$PID" 2>/dev/null || true
             fi
-          fi
-
-          if [ -f xray.pid ]; then
-            XPID="$(cat xray.pid 2>/dev/null || true)"
-
-            if [ -n "$XPID" ]; then
-              kill "$XPID" 2>/dev/null || true
-              sleep 2
-              kill -9 "$XPID" 2>/dev/null || true
-            fi
-          fi
-
-          ip link delete xray0 2>/dev/null || true
-
-          DEFAULT_ROUTE="$(cat default-route.txt 2>/dev/null || true)"
-
-          if [ -n "$DEFAULT_ROUTE" ]; then
-            ip route replace $DEFAULT_ROUTE 2>/dev/null || true
           fi
 
       - name: Notify Controller - VPN Stopped
@@ -1527,57 +334,18 @@ jobs:
               --arg event "vpn_stopped" \
               --arg run_id "$RUN_ID" \
               --arg github_run_id "${GITHUB_RUN_ID}" \
-              --arg mode "$(cat "$HOME/bale-vpn/xray-mode.txt" 2>/dev/null || echo DIRECT)" \
-              --arg egress_ip "$(cat "$HOME/bale-vpn/active-egress-ip.txt" 2>/dev/null || echo unknown)" \
               '{
-                event:$event,
-                controller_run_id:$run_id,
-                github_run_id:$github_run_id,
-                mode:$mode,
-                egress_ip:$egress_ip
+                event: $event,
+                controller_run_id: $run_id,
+                github_run_id: $github_run_id
               }')" \
             || echo "Controller callback failed."
 
-      - name: Show detailed logs
+      - name: Show BaleVPN log
         if: always()
         shell: bash
         run: |
-          cd "$HOME/bale-vpn" 2>/dev/null || exit 0
-
-          echo "========================================"
-          echo "===== FINAL NETWORK MODE ==============="
-          echo "========================================"
-
-          cat xray-mode.txt 2>/dev/null || echo "unknown"
-
-          echo
-          echo "===== RUNNER PUBLIC IP =================="
-          cat ../bale-vpn/controller_callback_url 2>/dev/null >/dev/null || true
-
-          echo
-          echo "===== ACTIVE EGRESS IP =================="
-          cat active-egress-ip.txt 2>/dev/null || echo "unknown"
-
-          echo
-          echo "===== BALEVPN LOG ======================="
-          tail -n 200 bale-vpn.log 2>/dev/null || true
-
-          echo
-          echo "===== XRAY RUNTIME LOG =================="
-          tail -n 200 xray-runtime.log 2>/dev/null || true
-
-          echo
-          echo "===== XRAY ERROR LOG ===================="
-          tail -n 200 xray-error.log 2>/dev/null || true
-
-          echo
-          echo "===== XRAY ACCESS LOG ==================="
-          tail -n 100 xray-access.log 2>/dev/null || true
-
-          echo
-          echo "===== ROUTING TABLE ====================="
-          ip -4 route 2>/dev/null || true
-
-          echo
-          echo "===== PROCESSES ========================="
-          ps aux | grep -E 'bale-vpn|xray' | grep -v grep || true
+          if [ -f "$HOME/bale-vpn/bale-vpn.log" ]; then
+            echo "----- Last BaleVPN log lines -----"
+            tail -n 200 "$HOME/bale-vpn/bale-vpn.log"
+          fi
