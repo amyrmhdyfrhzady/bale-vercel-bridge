@@ -12,6 +12,10 @@ on:
         required: false
         type: string
 
+permissions:
+  actions: write
+  contents: read
+
 concurrency:
   group: bale-vpn-server
   cancel-in-progress: false
@@ -192,8 +196,8 @@ jobs:
 
           PID="$(cat bale-vpn.pid)"
 
-          # Approximately 4h40m.
-          END=$(( $(date +%s) + 16800 ))
+          # Approximately 4h30m.
+          END=$(( $(date +%s) + 16200 ))
 
           while [ "$(date +%s)" -lt "$END" ]; do
 
@@ -210,6 +214,83 @@ jobs:
           done
 
           echo "Scheduled runtime finished."
+
+      - name: Start Next BaleVPN Runner
+        if: ${{ success() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROLLER_RUN_ID: ${{ inputs.controller_run_id }}
+          CONTROLLER_CALLBACK_URL: ${{ inputs.controller_callback_url }}
+        run: |
+          set -e
+
+          REPO="${GITHUB_REPOSITORY}"
+          REF="${GITHUB_REF_NAME}"
+
+          echo "Preparing next BaleVPN Runner..."
+          echo "Repository: ${REPO}"
+          echo "Ref: ${REF}"
+
+          WORKFLOW_ID="$(
+            curl -fsS \
+              --max-time 20 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "https://api.github.com/repos/${REPO}/actions/workflows" |
+            jq -er '
+              .workflows[]
+              | select(.name == "BaleVPN Server")
+              | .id
+            ' |
+            head -n 1
+          )"
+
+          if [ -z "$WORKFLOW_ID" ]; then
+            echo "ERROR: BaleVPN Server workflow was not found."
+            exit 1
+          fi
+
+          echo "Workflow ID: ${WORKFLOW_ID}"
+
+          jq -n \
+            --arg ref "$REF" \
+            --arg controller_run_id "$CONTROLLER_RUN_ID" \
+            --arg controller_callback_url "$CONTROLLER_CALLBACK_URL" \
+            '{
+              ref: $ref,
+              inputs: {
+                controller_run_id: $controller_run_id,
+                controller_callback_url: $controller_callback_url
+              }
+            }' > /tmp/next-run.json
+
+          echo "Dispatching next BaleVPN Runner..."
+
+          HTTP_CODE="$(
+            curl -sS \
+              --output /tmp/dispatch-response.json \
+              --write-out "%{http_code}" \
+              --max-time 30 \
+              -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_ID}/dispatches" \
+              --data @/tmp/next-run.json
+          )"
+
+          if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Failed to dispatch next Runner."
+            echo "HTTP status: $HTTP_CODE"
+            echo "Response:"
+            cat /tmp/dispatch-response.json || true
+            exit 1
+          fi
+
+          echo "Next BaleVPN Runner successfully dispatched."
 
       - name: Stop BaleVPN
         if: always()
